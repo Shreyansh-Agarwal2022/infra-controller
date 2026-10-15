@@ -1037,6 +1037,16 @@ func TestManageExpectedMachine_UpdateExpectedMachinesInDB(t *testing.T) {
 				reported.IsDpfEnabled = cutil.GetPtr(false)
 				want.IsDpfEnabled = cutil.GetPtr(false)
 			}},
+			// The rack, name, description, and DPF updates above leave the unset
+			// retention column NULL, because Core omits false.
+			{"BMC credential retention enabled", func(reported *corev1.ExpectedMachine, want *cdbm.ExpectedMachine) {
+				reported.BmcRetainCredentials = cutil.GetPtr(true)
+				want.BmcRetainCredentials = cutil.GetPtr(true)
+			}},
+			{"BMC credential retention disabled", func(reported *corev1.ExpectedMachine, want *cdbm.ExpectedMachine) {
+				reported.BmcRetainCredentials = nil
+				want.BmcRetainCredentials = cutil.GetPtr(false)
+			}},
 		} {
 			next := cases[len(cases)-1]
 			next.name = "replace only " + field.name

@@ -439,6 +439,8 @@ func TestCreateExpectedMachineHandler_Handle(t *testing.T) {
 				stored, err := emDAO.Get(ctx, nil, response.ID, nil, false)
 				require.NoError(t, err)
 				assert.Nil(t, stored.IsDpfEnabled, "response default must not change the stored optional value")
+				assert.Equal(t, "false", string(fields["bmcRetainCredentials"]))
+				assert.Nil(t, stored.BmcRetainCredentials, "response default must not change the stored optional value")
 				if tt.requestBodyJSON != "" {
 					assert.JSONEq(t, `{}`, string(fields["labels"]))
 					assert.JSONEq(t, `[]`, string(fields["fallbackDPUSerialNumbers"]))
@@ -2532,7 +2534,8 @@ func TestCreateExpectedMachinesHandler_Handle(t *testing.T) {
 						NicType:    cutil.GetPtr("CX9"),
 						FixedIP:    cutil.GetPtr("192.0.2.9"),
 					}},
-					Labels: map[string]string{"env": "test"},
+					Labels:               map[string]string{"env": "test"},
+					BmcRetainCredentials: cutil.GetPtr(true),
 				},
 				{
 					SiteID:              site.ID.String(),
@@ -2567,6 +2570,10 @@ func TestCreateExpectedMachinesHandler_Handle(t *testing.T) {
 				require.Len(t, response[0].Interfaces, 1)
 				assert.Equal(t, "02:AA:BB:CC:DD:EE", response[0].Interfaces[0].MacAddress)
 				assert.Equal(t, "CX9", batchRequest.ExpectedMachines.ExpectedMachines[0].HostNics[0].GetNicType())
+				assert.True(t, batchRequest.ExpectedMachines.ExpectedMachines[0].GetBmcRetainCredentials())
+				assert.Nil(t, batchRequest.ExpectedMachines.ExpectedMachines[1].BmcRetainCredentials)
+				assert.Equal(t, "true", string(fields[0]["bmcRetainCredentials"]))
+				assert.Equal(t, "false", string(fields[1]["bmcRetainCredentials"]))
 				assert.Contains(t, fields[0], "id")
 				assert.NotContains(t, fields[0], "Labels")
 			},
@@ -2780,7 +2787,7 @@ func TestCreateExpectedMachineHandler_BmcCredentialsForwardedToWorkflow(t *testi
 	}
 }
 
-func TestCreateExpectedMachineHandler_DpfEnabledForwardedToWorkflow(t *testing.T) {
+func TestCreateExpectedMachineHandler_OptionalFieldsForwardedToWorkflow(t *testing.T) {
 	e := echo.New()
 	dbSession := testExpectedMachineInitDB(t)
 	defer dbSession.Close()
@@ -2809,10 +2816,11 @@ func TestCreateExpectedMachineHandler_DpfEnabledForwardedToWorkflow(t *testing.T
 	handler := NewCreateExpectedMachineHandler(dbSession, scp, cfg)
 
 	rawBody := map[string]interface{}{
-		"siteId":              site.ID.String(),
-		"bmcMacAddress":       "00:AA:BB:CC:DD:EF",
-		"chassisSerialNumber": "DPF-TEST-CHASSIS-001",
-		"isDpfEnabled":        false,
+		"siteId":               site.ID.String(),
+		"bmcMacAddress":        "00:AA:BB:CC:DD:EF",
+		"chassisSerialNumber":  "DPF-TEST-CHASSIS-001",
+		"isDpfEnabled":         false,
+		"bmcRetainCredentials": true,
 		"interfaces": []map[string]interface{}{{
 			"macAddress": "02-aa-bb-cc-dd-ee",
 			"nicType":    "CX9",
@@ -2852,6 +2860,7 @@ func TestCreateExpectedMachineHandler_DpfEnabledForwardedToWorkflow(t *testing.T
 			assert.False(t, *capturedRequest.IsDpfEnabled)
 		}
 		assert.False(t, capturedRequest.DpfEnabled)
+		assert.True(t, capturedRequest.GetBmcRetainCredentials())
 		require.Len(t, capturedRequest.HostNics, 1)
 		assert.Equal(t, "02:AA:BB:CC:DD:EE", capturedRequest.HostNics[0].GetMacAddress())
 		assert.Equal(t, "CX9", capturedRequest.HostNics[0].GetNicType())
@@ -2862,10 +2871,12 @@ func TestCreateExpectedMachineHandler_DpfEnabledForwardedToWorkflow(t *testing.T
 	err = json.Unmarshal(rec.Body.Bytes(), &apiResponse)
 	assert.Nil(t, err)
 	assert.False(t, apiResponse.IsDpfEnabled)
+	assert.True(t, apiResponse.BmcRetainCredentials)
 	require.Len(t, apiResponse.Interfaces, 1)
 	assert.Equal(t, "02:AA:BB:CC:DD:EE", apiResponse.Interfaces[0].MacAddress)
 	stored, err := cdbm.NewExpectedMachineDAO(dbSession).Get(context.Background(), nil, apiResponse.ID, nil, false)
 	require.NoError(t, err)
+	assert.Equal(t, cutil.GetPtr(true), stored.BmcRetainCredentials)
 	require.Len(t, stored.Interfaces, 1)
 	assert.Equal(t, "02:AA:BB:CC:DD:EE", stored.Interfaces[0].MacAddress)
 }
@@ -2921,6 +2932,7 @@ func testUpdateExpectedMachineBmcCredentials(t *testing.T) {
 		expectedUsername string
 		expectedPassword string
 		expectedPath     string
+		expectedRetain   *bool
 	}{
 		{
 			name:             "password without username",
@@ -2942,6 +2954,12 @@ func testUpdateExpectedMachineBmcCredentials(t *testing.T) {
 				"fixedIp":    "192.0.2.9",
 			}}},
 			expectedPath: "host_nics",
+		},
+		{
+			name:           "explicit false BMC credential retention",
+			requestBody:    map[string]any{"bmcRetainCredentials": false},
+			expectedPath:   "bmc_retain_credentials",
+			expectedRetain: cutil.GetPtr(false),
 		},
 	}
 	for _, tt := range tests {
@@ -2982,6 +3000,12 @@ func testUpdateExpectedMachineBmcCredentials(t *testing.T) {
 				assert.Equal(t, "02:AA:BB:CC:DD:EE", capturedPatch.ExpectedMachine.HostNics[0].GetMacAddress())
 				assert.Equal(t, "CX9", capturedPatch.ExpectedMachine.HostNics[0].GetNicType())
 				assert.Equal(t, "192.0.2.9", capturedPatch.ExpectedMachine.HostNics[0].GetFixedIp())
+			}
+			if tt.expectedRetain != nil {
+				assert.Equal(t, tt.expectedRetain, capturedPatch.ExpectedMachine.BmcRetainCredentials)
+				stored, err := emDAO.Get(context.Background(), nil, testEM.ID, nil, false)
+				require.NoError(t, err)
+				assert.Equal(t, tt.expectedRetain, stored.BmcRetainCredentials)
 			}
 			for _, credential := range []string{tt.expectedUsername, tt.expectedPassword} {
 				if credential != "" {
@@ -3089,6 +3113,10 @@ func TestExpectedMachineUpdateFields(t *testing.T) {
 		{
 			name:     "DPF enablement",
 			setField: func(req *model.APIExpectedMachineUpdateRequest) { req.IsDpfEnabled = cutil.GetPtr(true) },
+		},
+		{
+			name:     "false BMC credential retention",
+			setField: func(req *model.APIExpectedMachineUpdateRequest) { req.BmcRetainCredentials = cutil.GetPtr(false) },
 		},
 		{
 			name:     "empty labels",
@@ -3384,14 +3412,16 @@ func testUpdateExpectedMachinesRequest(t *testing.T) {
 			name: "successful batch update",
 			requestBody: []model.APIExpectedMachineUpdateRequest{
 				{
-					ID:                  cutil.GetPtr(testEM1.ID.String()),
-					ChassisSerialNumber: cutil.GetPtr("UPDATED-BATCH-001"),
-					Labels:              map[string]string{"env": "updated"},
+					ID:                   cutil.GetPtr(testEM1.ID.String()),
+					ChassisSerialNumber:  cutil.GetPtr("UPDATED-BATCH-001"),
+					Labels:               map[string]string{"env": "updated"},
+					BmcRetainCredentials: cutil.GetPtr(true),
 				},
 				{
-					ID:                  cutil.GetPtr(testEM2.ID.String()),
-					ChassisSerialNumber: cutil.GetPtr("UPDATED-BATCH-002"),
-					Labels:              map[string]string{},
+					ID:                   cutil.GetPtr(testEM2.ID.String()),
+					ChassisSerialNumber:  cutil.GetPtr("UPDATED-BATCH-002"),
+					Labels:               map[string]string{},
+					BmcRetainCredentials: cutil.GetPtr(false),
 				},
 			},
 			setupContext: func(c echo.Context) {
@@ -3404,12 +3434,16 @@ func testUpdateExpectedMachinesRequest(t *testing.T) {
 				require.NotNil(t, capturedRequest)
 				require.Len(t, capturedRequest.Patches, 2)
 				for _, patch := range capturedRequest.Patches {
-					assert.Equal(t, []string{"metadata.labels", "chassis_serial_number"}, patch.UpdateMask.Paths)
+					assert.Equal(t, []string{"metadata.labels", "chassis_serial_number", "bmc_retain_credentials"}, patch.UpdateMask.Paths)
 				}
+				assert.Equal(t, cutil.GetPtr(true), capturedRequest.Patches[0].ExpectedMachine.BmcRetainCredentials)
+				assert.Equal(t, cutil.GetPtr(false), capturedRequest.Patches[1].ExpectedMachine.BmcRetainCredentials)
 				var response []model.APIExpectedMachine
 				err := json.Unmarshal(body, &response)
 				assert.Nil(t, err)
 				require.Len(t, response, 2)
+				assert.True(t, response[0].BmcRetainCredentials)
+				assert.False(t, response[1].BmcRetainCredentials)
 				var fields []map[string]json.RawMessage
 				require.NoError(t, json.Unmarshal(body, &fields))
 				assert.JSONEq(t, `{"env":"updated"}`, string(fields[0]["labels"]))

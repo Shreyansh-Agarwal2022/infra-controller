@@ -81,6 +81,25 @@ func TestToStandardExpectedMachineUpdateRequest(t *testing.T) {
 		assert.Equal(t, req.Interfaces, expectedMachineFromStandard(response).Interfaces)
 	})
 
+	for _, tc := range []struct {
+		name  string
+		value *bool
+	}{
+		{name: "unset BMC credential retention is omitted", value: nil},
+		{name: "false BMC credential retention is forwarded", value: standard.PtrBool(false)},
+		{name: "true BMC credential retention is forwarded", value: standard.PtrBool(true)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body, err := toStandardExpectedMachineUpdateRequest(ExpectedMachineUpdateRequest{BmcRetainCredentials: tc.value}).ToMap()
+			require.NoError(t, err)
+			if tc.value == nil {
+				assert.NotContains(t, body, "bmcRetainCredentials")
+				return
+			}
+			assert.Equal(t, tc.value, body["bmcRetainCredentials"])
+		})
+	}
+
 	t.Run("partial update with only FallbackDPUSerialNumbers set leaves Labels nil", func(t *testing.T) {
 		req := ExpectedMachineUpdateRequest{
 			FallbackDPUSerialNumbers: []string{"DPU-001", "DPU-002"},
@@ -142,4 +161,38 @@ func TestToStandardExpectedMachineUpdateRequest(t *testing.T) {
 		assert.Contains(t, body, "skuId")
 		assert.Contains(t, body, "labels")
 	})
+}
+
+func TestToStandardExpectedMachineCreateRequest(t *testing.T) {
+	tests := []struct {
+		name         string
+		retain       *bool
+		wantResponse bool
+	}{
+		{name: "omitted retention leaves the server default", retain: nil, wantResponse: false},
+		{name: "explicit false is forwarded", retain: standard.PtrBool(false), wantResponse: false},
+		{name: "explicit true is forwarded", retain: standard.PtrBool(true), wantResponse: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			apiReq := toStandardExpectedMachineCreateRequest(ExpectedMachineCreateRequest{
+				BmcMacAddress:        "00:11:22:33:44:55",
+				ChassisSerialNumber:  "CHASSIS-001",
+				BmcRetainCredentials: tt.retain,
+			}, "site-id")
+			body, err := apiReq.ToMap()
+			require.NoError(t, err)
+			if tt.retain == nil {
+				assert.NotContains(t, body, "bmcRetainCredentials")
+			} else {
+				assert.Equal(t, tt.retain, body["bmcRetainCredentials"])
+			}
+
+			response := standard.ExpectedMachine{}
+			if tt.wantResponse {
+				response.SetBmcRetainCredentials(true)
+			}
+			assert.Equal(t, tt.wantResponse, expectedMachineFromStandard(response).BmcRetainCredentials)
+		})
+	}
 }

@@ -245,6 +245,21 @@ func TestExpectedMachine_ToProto(t *testing.T) {
 		assert.False(t, proto.DpfEnabled)
 	})
 
+	// Unset must stay omitted so Core applies its default; false is a choice.
+	for _, tc := range []struct {
+		name   string
+		stored *bool
+	}{
+		{name: "omits unset bmc_retain_credentials", stored: nil},
+		{name: "forwards false bmc_retain_credentials", stored: &disabled},
+		{name: "forwards true bmc_retain_credentials", stored: &enabled},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			em := &ExpectedMachine{ID: id, BmcMacAddress: "aa:bb:cc:dd:ee:ff", ChassisSerialNumber: "CSN-1", BmcRetainCredentials: tc.stored}
+			assert.Equal(t, tc.stored, em.ToProto(ExpectedMachineCredentials{}).BmcRetainCredentials)
+		})
+	}
+
 	t.Run("forwards interfaces in order", func(t *testing.T) {
 		nicType := "CX9"
 		fixedIP := "192.0.2.9"
@@ -1975,6 +1990,7 @@ func TestExpectedMachineSQLDAO_UpdateMultiple(t *testing.T) {
 		BmcMacAddress:            "00:1B:44:11:3A:D3",
 		ChassisSerialNumber:      "CHASSIS-UPDATE-003",
 		FallbackDpuSerialNumbers: []string{"DPU001"},
+		BmcRetainCredentials:     cutil.GetPtr(true),
 		CreatedBy:                user.ID,
 	})
 	assert.Nil(t, err)
@@ -1988,6 +2004,8 @@ func TestExpectedMachineSQLDAO_UpdateMultiple(t *testing.T) {
 		expectError        bool
 		expectedCount      int
 		verifyChildSpanner bool
+		// wantRetain checks rows by ID, including rows whose input omitted the field.
+		wantRetain map[uuid.UUID]*bool
 	}{
 		{
 			desc: "batch update three expected machines",
@@ -2036,6 +2054,16 @@ func TestExpectedMachineSQLDAO_UpdateMultiple(t *testing.T) {
 			expectError:   false,
 			expectedCount: 1,
 		},
+		{
+			// The column is applied per row, so a row that omits it keeps its value.
+			desc: "mixed batch preserves omitted BMC credential retention",
+			inputs: []ExpectedMachineUpdateInput{
+				{ExpectedMachineID: em1.ID, BmcRetainCredentials: cutil.GetPtr(false)},
+				{ExpectedMachineID: em3.ID, Labels: map[string]string{"retain": "omitted"}},
+			},
+			expectedCount: 2,
+			wantRetain:    map[uuid.UUID]*bool{em1.ID: cutil.GetPtr(false), em3.ID: cutil.GetPtr(true)},
+		},
 	}
 
 	for _, tc := range tests {
@@ -2062,6 +2090,9 @@ func TestExpectedMachineSQLDAO_UpdateMultiple(t *testing.T) {
 					}
 					if tc.inputs[i].Interfaces != nil {
 						assert.Equal(t, tc.inputs[i].Interfaces, em.Interfaces)
+					}
+					if want, ok := tc.wantRetain[em.ID]; ok {
+						assert.Equal(t, want, em.BmcRetainCredentials)
 					}
 				}
 			}

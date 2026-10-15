@@ -1581,7 +1581,7 @@ func TestAPIExpectedMachineUpdateRequest_ToProto(t *testing.T) {
 	}{
 		{name: "omitted fields preserve Core state", body: `{}`},
 		{name: "null fields preserve Core state", body: `{"defaultBmcUsername":null,"defaultBmcPassword":null,"labels":null,"slotId":null,"bmcIpAddress":null}`},
-		{name: "explicit zero and empty values remain selected", body: `{"slotId":0,"labels":{},"fallbackDPUSerialNumbers":[],"isDpfEnabled":false,"hostLifecycleProfile":{"disableLockdown":false},"bmcIpAddress":""}`, wantPaths: []string{"bmc_ip_address", "metadata.labels", "fallback_dpu_serial_numbers", "is_dpf_enabled", "host_lifecycle_profile.disable_lockdown"}},
+		{name: "explicit zero and empty values remain selected", body: `{"slotId":0,"labels":{},"fallbackDPUSerialNumbers":[],"isDpfEnabled":false,"bmcRetainCredentials":false,"hostLifecycleProfile":{"disableLockdown":false},"bmcIpAddress":""}`, wantPaths: []string{"bmc_ip_address", "metadata.labels", "fallback_dpu_serial_numbers", "is_dpf_enabled", "bmc_retain_credentials", "host_lifecycle_profile.disable_lockdown"}},
 		{name: "BMC address selects automatic allocation", body: `{"bmcIpAddress":"192.0.2.31"}`, wantPaths: []string{"bmc_ip_address", "bmc_ip_allocation"}},
 		{name: "slot ID alone selects derived labels", body: `{"slotId":0}`, wantPaths: []string{"metadata.labels"}},
 		{name: "BMC username leaves the password unselected", body: `{"defaultBmcUsername":"admin","defaultBmcPassword":null}`, wantPaths: []string{"bmc_username"}},
@@ -1596,7 +1596,7 @@ func TestAPIExpectedMachineUpdateRequest_ToProto(t *testing.T) {
 			var request APIExpectedMachineUpdateRequest
 			require.NoError(t, json.Unmarshal([]byte(test.body), &request))
 			require.NoError(t, request.Validate())
-			patch := request.ToProto(&cdbm.ExpectedMachine{SlotID: cutil.GetPtr(int32(0)), IsDpfEnabled: cutil.GetPtr(false), HostLifecycleProfile: cdbm.HostLifecycleProfile{DisableLockdown: cutil.GetPtr(false)}})
+			patch := request.ToProto(&cdbm.ExpectedMachine{SlotID: cutil.GetPtr(int32(0)), IsDpfEnabled: cutil.GetPtr(false), BmcRetainCredentials: request.BmcRetainCredentials, HostLifecycleProfile: cdbm.HostLifecycleProfile{DisableLockdown: cutil.GetPtr(false)}})
 			encoded, err := protojson.Marshal(patch)
 			require.NoError(t, err)
 			var decoded corev1.PatchExpectedMachineRequest
@@ -1616,6 +1616,8 @@ func TestAPIExpectedMachineUpdateRequest_ToProto(t *testing.T) {
 				assert.Equal(t, *request.DefaultBmcPassword, decoded.GetExpectedMachine().GetBmcPassword())
 			}
 			assert.Equal(t, request.BmcIpAddress, decoded.GetExpectedMachine().BmcIpAddress)
+			// A selected false must reach Core as present, because Core rejects a selected empty value.
+			assert.Equal(t, request.BmcRetainCredentials, decoded.GetExpectedMachine().BmcRetainCredentials)
 			if request.BmcIpAddress != nil && *request.BmcIpAddress != "" {
 				assert.Equal(t, corev1.BmcIpAllocationType_BMC_IP_ALLOCATION_TYPE_AUTO, decoded.GetExpectedMachine().GetBmcIpAllocation())
 			}
