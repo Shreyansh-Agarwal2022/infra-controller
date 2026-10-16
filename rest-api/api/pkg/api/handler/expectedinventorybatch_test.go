@@ -5,6 +5,7 @@ package handler
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
@@ -149,7 +151,7 @@ func TestReplaceAllExpectedMachinesRollsBackOnCoreFailure(t *testing.T) {
 	dao := cdbm.NewExpectedMachineDAO(dbSession)
 	original, err := dao.Create(ctx, nil, cdbm.ExpectedMachineCreateInput{
 		ExpectedMachineID: uuid.New(), SiteID: site.ID, BmcMacAddress: "00:11:22:33:44:10",
-		ChassisSerialNumber: "original", CreatedBy: user.ID,
+		ChassisSerialNumber: "original", BmcRetainCredentials: cutil.GetPtr(true), CreatedBy: user.ID,
 	})
 	require.NoError(t, err)
 
@@ -164,13 +166,14 @@ func TestReplaceAllExpectedMachinesRollsBackOnCoreFailure(t *testing.T) {
 		run.AssertExpectations(t)
 	})
 
-	body := fmt.Sprintf(`{"siteId":%q,"expectedMachines":[{"siteId":%q,"bmcMacAddress":"00:11:22:33:44:11","chassisSerialNumber":"replacement"}]}`, site.ID.String(), site.ID.String())
+	body := fmt.Sprintf(`{"siteId":%q,"expectedMachines":[{"siteId":%q,"bmcMacAddress":"00:11:22:33:44:10","chassisSerialNumber":"replacement","bmcRetainCredentials":false}]}`, site.ID.String(), site.ID.String())
 	recorder := invokeExpectedInventoryBatchHandler(t, user, org, http.MethodPut, "/v2/org/test-org/nico/expected-machine/all", body, "", NewReplaceAllExpectedMachinesHandler(dbSession, pool, common.GetTestConfig()).Handle)
 	require.Equal(t, http.StatusInternalServerError, recorder.Code, recorder.Body.String())
 
 	stored, err := dao.Get(ctx, nil, original.ID, nil, false)
 	require.NoError(t, err)
 	require.Equal(t, "original", stored.ChassisSerialNumber)
+	require.Equal(t, cutil.GetPtr(true), stored.BmcRetainCredentials)
 	_, count, err := dao.GetAll(ctx, nil, cdbm.ExpectedMachineFilterInput{SiteIDs: []uuid.UUID{site.ID}}, paginator.PageInput{}, nil)
 	require.NoError(t, err)
 	require.Equal(t, 1, count)
@@ -238,8 +241,8 @@ func TestExpectedInventoryBatchHandlers(t *testing.T) {
 	var captured []grpcproxy.Request
 	client.On("ExecuteWorkflow", mock.Anything, mock.Anything, "InvokeCoreGRPC", mock.Anything).
 		Run(func(args mock.Arguments) { captured = append(captured, args.Get(3).(grpcproxy.Request)) }).
-		Return(run, nil).Times(6)
-	run.On("Get", mock.Anything, mock.Anything).Return(nil).Times(6)
+		Return(run, nil).Times(9)
+	run.On("Get", mock.Anything, mock.Anything).Return(nil).Times(9)
 	t.Cleanup(func() {
 		client.AssertExpectations(t)
 		run.AssertExpectations(t)
@@ -310,6 +313,46 @@ func TestExpectedInventoryBatchHandlers(t *testing.T) {
 	testDecodeExpectedComponentPatch(t, captured[2], site.ID.String(), &shelfList)
 	require.Len(t, shelfList.ExpectedPowerShelves, 1)
 	require.Equal(t, "shelf-pass", shelfList.ExpectedPowerShelves[0].BmcPassword)
+
+	previousID, err := uuid.Parse(machineList.ExpectedMachines[0].GetId().GetValue())
+	require.NoError(t, err)
+	machineDAO := cdbm.NewExpectedMachineDAO(dbSession)
+	for _, test := range []struct {
+		name           string
+		retentionField string
+		wantStored     *bool
+		wantResponse   bool
+	}{
+		{name: "PUT changes retention from true to false", retentionField: `,"bmcRetainCredentials":false`, wantStored: cutil.GetPtr(false)},
+		{name: "PUT changes retention from false to true", retentionField: `,"bmcRetainCredentials":true`, wantStored: cutil.GetPtr(true), wantResponse: true},
+		{name: "PUT omission replaces true with the default false"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			body := fmt.Sprintf(`{"siteId":%q,"expectedMachines":[{"siteId":%q,"bmcMacAddress":"00:11:22:33:44:01","chassisSerialNumber":"machine-1","defaultBmcUsername":"machine-user","defaultBmcPassword":"machine-pass"%s}]}`, site.ID.String(), site.ID.String(), test.retentionField)
+			recorder := invokeExpectedInventoryBatchHandler(t, user, org, http.MethodPut, replacements[0].path, body, "", replacements[0].handle)
+			require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+
+			var response []model.APIExpectedMachine
+			require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &response))
+			require.Len(t, response, 1)
+			require.Equal(t, test.wantResponse, response[0].BmcRetainCredentials)
+			require.NotEqual(t, previousID, response[0].ID, "PUT replaces the row with a new ID")
+			_, err := machineDAO.Get(ctx, nil, previousID, nil, false)
+			require.ErrorIs(t, err, cdb.ErrDoesNotExist)
+			stored, err := machineDAO.Get(ctx, nil, response[0].ID, nil, false)
+			require.NoError(t, err)
+			require.Equal(t, test.wantStored, stored.BmcRetainCredentials)
+			previousID = response[0].ID
+
+			request := captured[len(captured)-1]
+			require.Equal(t, corev1.Forge_ReplaceAllExpectedMachines_FullMethodName, request.FullMethod)
+			var machines corev1.ExpectedMachineList
+			testDecodeExpectedComponentPatch(t, request, site.ID.String(), &machines)
+			require.Len(t, machines.ExpectedMachines, 1)
+			require.Equal(t, test.wantStored, machines.ExpectedMachines[0].BmcRetainCredentials)
+			require.Equal(t, response[0].ID.String(), machines.ExpectedMachines[0].GetId().GetValue())
+		})
+	}
 
 	deletions := []struct {
 		name, path, method string

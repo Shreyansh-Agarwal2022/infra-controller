@@ -2899,10 +2899,11 @@ func testUpdateExpectedMachineBmcCredentials(t *testing.T) {
 	ctx := context.Background()
 	emDAO := cdbm.NewExpectedMachineDAO(dbSession)
 	testEM, err := emDAO.Create(ctx, nil, cdbm.ExpectedMachineCreateInput{
-		ExpectedMachineID:   uuid.New(),
-		SiteID:              site.ID,
-		BmcMacAddress:       "00:11:22:33:AA:BB",
-		ChassisSerialNumber: "CRED-UPDATE-CHASSIS-001",
+		ExpectedMachineID:    uuid.New(),
+		SiteID:               site.ID,
+		BmcMacAddress:        "00:11:22:33:AA:BB",
+		ChassisSerialNumber:  "CRED-UPDATE-CHASSIS-001",
+		BmcRetainCredentials: cutil.GetPtr(false),
 	})
 	assert.Nil(t, err)
 	assert.NotNil(t, testEM)
@@ -2956,7 +2957,23 @@ func testUpdateExpectedMachineBmcCredentials(t *testing.T) {
 			expectedPath: "host_nics",
 		},
 		{
-			name:           "explicit false BMC credential retention",
+			name:           "BMC credential retention false to true",
+			requestBody:    map[string]any{"bmcRetainCredentials": true},
+			expectedPath:   "bmc_retain_credentials",
+			expectedRetain: cutil.GetPtr(true),
+		},
+		{
+			name:           "omitted BMC credential retention preserves true",
+			requestBody:    map[string]any{},
+			expectedRetain: cutil.GetPtr(true),
+		},
+		{
+			name:           "null BMC credential retention preserves true",
+			requestBody:    map[string]any{"bmcRetainCredentials": nil},
+			expectedRetain: cutil.GetPtr(true),
+		},
+		{
+			name:           "BMC credential retention true to false",
 			requestBody:    map[string]any{"bmcRetainCredentials": false},
 			expectedPath:   "bmc_retain_credentials",
 			expectedRetain: cutil.GetPtr(false),
@@ -2992,7 +3009,11 @@ func testUpdateExpectedMachineBmcCredentials(t *testing.T) {
 			require.NoError(t, handler.Handle(c))
 			assert.Equal(t, http.StatusOK, rec.Code, "Response: %s", rec.Body.String())
 			require.NotNil(t, capturedPatch, "workflow should have received a request")
-			assert.Equal(t, []string{tt.expectedPath}, capturedPatch.UpdateMask.Paths)
+			var expectedPaths []string
+			if tt.expectedPath != "" {
+				expectedPaths = []string{tt.expectedPath}
+			}
+			assert.Equal(t, expectedPaths, capturedPatch.UpdateMask.Paths)
 			assert.Equal(t, tt.expectedUsername, capturedPatch.ExpectedMachine.BmcUsername)
 			assert.Equal(t, tt.expectedPassword, capturedPatch.ExpectedMachine.BmcPassword)
 			if tt.expectedPath == "host_nics" {
@@ -3006,6 +3027,9 @@ func testUpdateExpectedMachineBmcCredentials(t *testing.T) {
 				stored, err := emDAO.Get(context.Background(), nil, testEM.ID, nil, false)
 				require.NoError(t, err)
 				assert.Equal(t, tt.expectedRetain, stored.BmcRetainCredentials)
+				var response model.APIExpectedMachine
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+				assert.Equal(t, *tt.expectedRetain, response.BmcRetainCredentials)
 			}
 			for _, credential := range []string{tt.expectedUsername, tt.expectedPassword} {
 				if credential != "" {
